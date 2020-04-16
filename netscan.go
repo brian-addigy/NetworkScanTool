@@ -17,17 +17,12 @@ import (
 	"text/tabwriter"
 )
 
-type port struct {
-	Number string
-	State  string
-}
-
 type host struct {
-	Brand   string
-	OsType  string
-	IpAddr  string
-	MacAddr string
-	Ports   []port
+	Brand   string `json:"manufacturer"`
+	OsType  string `json:"os_type"`
+	IpAddr  string `json:"ip_address"`
+	MacAddr string `json:"mac_address"`
+	ports   string `json:"open_ports"`
 }
 
 func main() {
@@ -47,13 +42,11 @@ func main() {
 
 	// --scan/-s isnt provided, print usage
 	if !*scanFlagPtr {
-		
-	}
-
-	if *scanFlagPtr {
+		flag.Usage()
+	} else {
 		// Find local ip Address
 		if ipAddrs != "error" {
-			fmt.Println("Beginning Scan .....................")
+			fmt.Println("Beginning Scan .....................\n")
 			allHosts = ParseData(GetNmapData(nmapPath, ipAddrs))
 			// flag is set
 			if *jsonFlagPtr  {
@@ -63,7 +56,6 @@ func main() {
 			}
 		}
 	}
-	fmt.Println("Done")
 }
 
 func InstallNmap(nmapPath string) {
@@ -102,12 +94,14 @@ func InstallNmap(nmapPath string) {
 
 func GetNmapData(nmapPath string,ip string) []string {
 	//Runs nmap
-	scanPorts := "-p 22,3389,64084,443,21,80,53,88,110,143,993,995,3283,5900"
+	// 62078 iphone-sync; 64084 lan-cache
+	scanPorts := "-p 22,445,62078,3389,64084,443,21,80,53,88,110,143,993,995,3283,5900,57621,60159,62078"
 
 	output := exec.Command("nmap", "-PA",scanPorts, ip)
 	var out bytes.Buffer
 	output.Stdout = &out
 	err := output.Run()
+	// catch any errors when running command
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -141,7 +135,7 @@ func ParseData(data []string) []host {
 	macAdrReg := regexp.MustCompile(`([0-9a-fA-F][0-9a-fA-F]:){5}([0-9a-fA-F][0-9a-fA-F])`)
 	ipAdrReg := regexp.MustCompile(`(?:[0-9]{1,3}\.){3}[0-9]{1,3}`)
 	brandReg := regexp.MustCompile(`\((.*?)\)`)
-	portReg := regexp.MustCompile(`(closed|open|filtered)`)
+	portReg := regexp.MustCompile(`(open)`)
 	var allHosts []host
 	var curHost host
 
@@ -149,22 +143,28 @@ func ParseData(data []string) []host {
 	for i:=1; i < len(data); i++ {
 		ipAdrs := ipAdrReg.FindString(data[i])
 
-		// iterate through 1 host, out gives ip address first
-		// if IP is found, then a new host has appeared
-		if ipAdrs != "" {
-			// clear host to reuse
+		// iterate through 1 host
+		// if scan reports <ipaddress>, then a new host has appeared
+		if ipAdrs != "" && strings.Contains(data[i],"scan report"){
+			// reuse host
 			curHost = host{}
 			curHost.IpAddr = ipAdrs
-		} else if strings.Contains(data[i-1],"PORT") {
-			// if i-1 contains port then the Ports are at i
+		}
+		// Port header is found, port numbers follow
+		if strings.Contains(data[i-1],"PORT") {
+			// if i-1 contains port then the ports are at i
 
-			// iterate through all Ports, as long as you dont find end of port (contains "MAC" or a blank space))
+			// iterate through all ports, as long as you dont find end of port (contains "MAC" or a blank space))
 			for data[i] != "" && !strings.Contains(data[i], "MAC") {
 				portNum := strings.Split(data[i]," ")
 				portSrv :=  portReg.FindString(data[i])
-				if portSrv != "" {
-					tempPort := port{portNum[0],portSrv }
-					curHost.Ports = append(curHost.Ports, tempPort)
+				// found a Regular exp. match
+				if portSrv != ""  {
+					if curHost.ports == "" {
+						curHost.ports = portNum[0]
+					} else {
+						curHost.ports = curHost.ports + ", " + portNum[0]
+					}
 				}
 				// Continue to iterate
 				i++
@@ -175,29 +175,46 @@ func ParseData(data []string) []host {
 				brand := brandReg.FindString(data[i])
 				curHost.MacAddr = mac
 				curHost.Brand = brand
+				curHost.OsType = GetOs(curHost.ports,curHost.Brand)
+				// add current host to the list of hosts
+				allHosts = append(allHosts, curHost)
 			}
-			// add current host to the list of hosts
-			allHosts = append(allHosts, curHost)
 		}
 	}
 	return allHosts
 }
 
+func GetOs(ports string, brand string) string {
+	iosPort := "62078"
+
+	// found an apple product
+	if strings.Contains(brand, "Apple") {
+		// check if its iOS, if not default to MacOS
+		if strings.Contains(ports, iosPort) {
+			// added space for formatting issue. All are 7 spaces long
+			return "iOS"
+		} else {
+			return "MacOS"
+		}
+	}
+	return "Unknown"
+}
+
 func PrintHosts(allHosts []host) {
 	writer := new(tabwriter.Writer)
-	writer.Init(os.Stdout, 0, 8, 2, '\t', tabwriter.Debug|tabwriter.AlignRight|tabwriter.TabIndent)
-	fmt.Fprintln(writer, "Manufacturer\tMAC Address\tIP\tPorts\tState")
+	writer.Init(os.Stdout, 0, 8, 1, '\t', tabwriter.Debug|tabwriter.AlignRight|tabwriter.TabIndent)
+	fmt.Fprintln(writer, "Manufacturer\tOS type\tMAC Address\tIP Address\tOpen ports")
+	fmt.Fprintln(writer, "----------------------\t-------\t-------------------\t--------------\t--------------")
 
+	// print out each host
 	for i:=0; i < len(allHosts); i++ {
-		fmt.Fprintln(writer,"------------------------\t---------------------\t-----------------\t--------------\t---------")
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", allHosts[i].Brand,allHosts[i].MacAddr, allHosts[i].IpAddr,allHosts[i].Ports[0].Number,allHosts[i].Ports[0].State)
-		for j:=1; j < len(allHosts[i].Ports); j++ {
-			fmt.Fprintf(writer, " \t \t \t%s\t%s\n", allHosts[i].Ports[j].Number,allHosts[i].Ports[j].State)
-		}
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", allHosts[i].Brand,allHosts[i].OsType,allHosts[i].MacAddr, allHosts[i].IpAddr,allHosts[i].ports)
 	}
 	fmt.Fprintln(writer)
 	writer.Flush()
 
+	fmt.Println("Scan Complete.")
+	fmt.Println("Total number of Hosts up:", len(allHosts))
 }
 
 func JsonPrintHosts(allHost []host) {
